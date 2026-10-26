@@ -177,8 +177,8 @@ export class NovigradEngine implements NovigradEngineAPI {
       this.buildAll();
 
       const popParam = params.get('pop');
-      let pop = 4096;
-      if (popParam) pop = clamp(parseInt(popParam, 10) || 4096, 64, 16384);
+      let pop = 16384;
+      if (popParam) pop = clamp(parseInt(popParam, 10) || 16384, 64, 16384);
       this.sim!.uploadCity(this.city!);
       this.sim!.populate(pop, this.city!);
 
