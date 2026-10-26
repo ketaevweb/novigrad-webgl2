@@ -118,6 +118,7 @@ export class NovigradEngine implements NovigradEngineAPI {
 
   private mode: CameraMode = 'free';
   private followPos: number[] = [0, 0];
+  private followVis = 1;
 
   private tod = 10;
   private autoTime = true;
@@ -351,7 +352,18 @@ export class NovigradEngine implements NovigradEngineAPI {
 
     this.updateCamera(dt);
     if (this.mode === 'follow' && this.frameNo % 4 === 0) {
-      this.followPos = this.sim!.readFollow();
+      const r = this.sim!.readFollow();
+      this.followPos = [r[0], r[1]];
+      this.followVis = r[2];
+      // наблюдаемый скрыт (дома) — переключаем на видимого
+      if (!this.followVis) {
+        for (let k = 0; k < 10 && !this.followVis; k++) {
+          this.sim!.nextCitizen();
+          const r2 = this.sim!.readFollow();
+          this.followPos = [r2[0], r2[1]];
+          this.followVis = r2[2];
+        }
+      }
     }
 
     try {
@@ -457,12 +469,33 @@ export class NovigradEngine implements NovigradEngineAPI {
 
   private applyOrbit() {
     const cp = Math.cos(this.pitch);
-    this.camEye = [
+    let eye = [
       this.orbitTarget[0] + this.dist * cp * Math.sin(this.yaw),
       this.orbitTarget[1] + this.dist * Math.sin(this.pitch),
       this.orbitTarget[2] + this.dist * cp * Math.cos(this.yaw),
     ];
+    if (this.dist < 70) eye = this.resolveCamCollision(eye);
+    this.camEye = eye;
     this.camTarget = this.orbitTarget;
+  }
+
+  /** не даём камере забираться внутрь зданий (по occupancy-карте) */
+  private resolveCamCollision(eye: number[]): number[] {
+    const occ = this.city?.occ;
+    if (!occ) return eye;
+    const blocked = (x: number, z: number) => {
+      const cx = Math.floor(((x + 450) / 900) * 512);
+      const cz = Math.floor(((z + 450) / 900) * 512);
+      if (cx < 0 || cz < 0 || cx >= 512 || cz >= 512) return true;
+      return occ[cz * 512 + cx] > 0.5;
+    };
+    const t = this.orbitTarget;
+    if (!blocked(eye[0], eye[2])) return eye;
+    for (let k = 0.85; k >= 0.25; k -= 0.1) {
+      const c = [t[0] + (eye[0] - t[0]) * k, t[1] + (eye[1] - t[1]) * k, t[2] + (eye[2] - t[2]) * k];
+      if (!blocked(c[0], c[2])) return c;
+    }
+    return [t[0], t[1] + 7, t[2]];
   }
 
   private computeMatrices() {
@@ -721,7 +754,7 @@ export class NovigradEngine implements NovigradEngineAPI {
   setCameraMode(m: CameraMode): void {
     this.mode = m;
     if (m === 'follow') {
-      this.followPos = this.sim ? this.sim.readFollow() : [0, 0];
+      this.refreshFollow();
     }
     if (m === 'free') {
       this.orbitTarget = [0, 8, 40];
@@ -759,6 +792,17 @@ export class NovigradEngine implements NovigradEngineAPI {
 
   nextCitizen(): void {
     this.sim?.nextCitizen();
-    this.followPos = this.sim ? this.sim.readFollow() : [0, 0];
+    this.refreshFollow();
+  }
+
+  private refreshFollow() {
+    if (!this.sim) { this.followPos = [0, 0]; return; }
+    for (let k = 0; k < 10; k++) {
+      const r = this.sim.readFollow();
+      this.followPos = [r[0], r[1]];
+      this.followVis = r[2];
+      if (this.followVis) break;
+      this.sim.nextCitizen();
+    }
   }
 }

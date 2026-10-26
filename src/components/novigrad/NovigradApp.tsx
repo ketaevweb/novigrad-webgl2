@@ -55,9 +55,12 @@ export default function NovigradApp() {
       setReady(true);
     });
     engine.attach(canvasRef.current!);
+    // отладочный доступ из консоли
+    (window as unknown as Record<string, unknown>).__novigrad = engine;
     return () => {
       engine.dispose();
       engineRef.current = null;
+      delete (window as unknown as Record<string, unknown>).__novigrad;
     };
   }, []);
 

@@ -335,22 +335,25 @@ void main() {
 
 export const ENCODE_VS = SIM_VS;
 
-/** кодирование позиции горожанина followIdx в RGBA8 1x1 для readPixels */
+/** кодирование позиции горожанина followIdx в RGBA8 1x1 для readPixels; A = видимость (не HOME) */
 export const ENCODE_FS = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
 out vec4 fragColor;
 uniform sampler2D uS0;
+uniform sampler2D uS1;
 uniform int uTexW;
 uniform int uIdx;
 uniform float uHalf;
 void main() {
   ivec2 tc = ivec2(uIdx % uTexW, uIdx / uTexW);
   vec4 s = texelFetch(uS0, tc, 0);
+  float state = texelFetch(uS1, tc, 0).z;
+  float vis = state > 2.5 && state < 3.5 ? 0.0 : 1.0;
   float sp = clamp(length(s.zw) / 3.0, 0.0, 1.0);
   fragColor = vec4(clamp((s.x + uHalf) / (2.0 * uHalf), 0.0, 1.0),
                    clamp((s.y + uHalf) / (2.0 * uHalf), 0.0, 1.0),
-                   sp, 1.0);
+                   sp, vis);
 }
 `;
 
@@ -593,9 +596,10 @@ void main() {
   float glitter = pow(max(dot(R, uSunDir), 0.0), 700.0);
   col += uSunColor * glitter * 3.0;
 
-  // sparkle
+  // sparkle (с затуханием по дистанции против алиасинга)
   float spark = hash12(floor(p * 3.0) + floor(t * 2.0));
-  col += vec3(0.5, 0.6, 0.6) * step(0.985, spark) * 0.25;
+  float dCam0 = length(vWorld - uCamPos);
+  col += vec3(0.5, 0.6, 0.6) * step(0.985, spark) * 0.25 * smoothstep(140.0, 25.0, dCam0);
 
   col *= (uAmbient * 1.7 + uSunColor * 0.28);
 

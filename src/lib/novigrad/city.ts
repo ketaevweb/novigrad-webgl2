@@ -184,25 +184,25 @@ export function generateCity(seed = 4242): CityData {
   const lanes: { pts: [number, number][]; w: number }[] = [];
   {
     let tries = 0;
-    while (lanes.length < 46 && tries < 3000) {
+    while (lanes.length < 64 && tries < 6000) {
       tries++;
       const a0 = rnd() * Math.PI * 2;
-      const cx = -110 + rnd() * 250, cz = -80 + rnd() * 250;
+      const cx = -115 + rnd() * 260, cz = -85 + rnd() * 260;
       const nPts = 2 + Math.floor(rnd() * 3);
       const pts: [number, number][] = [];
       let x = cx, z = cz, dir = a0;
       let ok = true;
       for (let k = 0; k < nPts; k++) {
-        if (!onLand(x, z) || Math.hypot(x - LAG_C[0], z - LAG_C[1]) < LAG_R + 6) { ok = false; break; }
+        if (!onLand(x, z) || Math.hypot(x - LAG_C[0], z - LAG_C[1]) < LAG_R + 5) { ok = false; break; }
         let bad = false;
-        for (const p of plazas) if (Math.hypot(x - p.x, z - p.z) < p.r + 5) bad = true;
-        for (const s of roadSegs) if (distToSeg2(x, z, s.x1, s.z1, s.x2, s.z2) < 10) bad = true;
-        for (const l of lanes) for (const q of l.pts) if (Math.hypot(x - q[0], z - q[1]) < 16) bad = true;
+        for (const p of plazas) if (Math.hypot(x - p.x, z - p.z) < p.r + 4) bad = true;
+        for (const s of roadSegs) if (distToSeg2(x, z, s.x1, s.z1, s.x2, s.z2) < 8.5) bad = true;
+        for (const l of lanes) for (const q of l.pts) if (Math.hypot(x - q[0], z - q[1]) < 13) bad = true;
         if (bad) { ok = false; break; }
         pts.push([x, z]);
         dir += (rnd() - 0.5) * 1.5;
-        x += Math.sin(dir) * (24 + rnd() * 26);
-        z += Math.cos(dir) * (24 + rnd() * 26);
+        x += Math.sin(dir) * (22 + rnd() * 26);
+        z += Math.cos(dir) * (22 + rnd() * 26);
       }
       if (ok && pts.length >= 2) lanes.push({ pts, w: 4.5 });
     }
@@ -500,7 +500,7 @@ export function generateCity(seed = 4242): CityData {
   const placed: { x: number; z: number; w: number; d: number }[] = [];
   const clearOfBuildings = (x: number, z: number, half: number) => {
     for (const p of placed) {
-      if (Math.hypot(x - p.x, z - p.z) < half + Math.max(p.w, p.d) / 2 + 0.8) return false;
+      if (Math.hypot(x - p.x, z - p.z) < half + Math.max(p.w, p.d) / 2 + 0.35) return false;
     }
     return true;
   };
@@ -534,18 +534,18 @@ export function generateCity(seed = 4242): CityData {
       if (len < 6) continue;
       const ux = dx / len, uz = dz / len;
       const nx = -uz, nz = ux;
-      let t = 2 + rnd() * 3;
+      let t = 1.5 + rnd() * 2;
       while (t < len - 3) {
         const w = 6.5 + rnd() * 5.5;
-        const gap = 1.2 + rnd() * 2.2;
+        const gap = 0.6 + rnd() * 1.4;
         const siteT = t + w / 2;
         if (siteT > len - 2) break;
         const cx = s.x1 + ux * siteT, cz = s.z1 + uz * siteT;
         for (const side of [-1, 1]) {
-          if (rnd() < 0.12) continue; // разрывы
+          if (rnd() < 0.05) continue; // редкие разрывы
           const d = 5.5 + rnd() * 3.5;
-          const bx = cx + nx * side * (s.w / 2 + d / 2 + 0.6);
-          const bz = cz + nz * side * (s.w / 2 + d / 2 + 0.6);
+          const bx = cx + nx * side * (s.w / 2 + d / 2 + 0.4);
+          const bz = cz + nz * side * (s.w / 2 + d / 2 + 0.4);
           const half = Math.max(w, d) / 2;
           const rich = Math.hypot(bx - 0, bz - 40) < 75;
           const h = 7.5 + rnd() * 5 + (rich ? rnd() * 5 : 0) + (rnd() < 0.1 ? 4 : 0);
@@ -556,6 +556,34 @@ export function generateCity(seed = 4242): CityData {
         }
         t += w + gap;
       }
+    }
+  }
+
+  // заполнение кварталов: дома внутри блоков (плотный город как на карте)
+  {
+    let extra = 0, att = 0;
+    while (extra < 320 && att < 14000) {
+      att++;
+      const x = -135 + rnd() * 300, z = -95 + rnd() * 275;
+      if (!onLand(x, z)) continue;
+      if (Math.hypot(x - LAG_C[0], z - LAG_C[1]) < LAG_R + 4) continue;
+      const w = 6 + rnd() * 5, d = 6 + rnd() * 4;
+      const half = Math.max(w, d) / 2;
+      if (!siteOk(x, z, half)) continue;
+      // должен быть рядом со улицей
+      let best = 1e9, brot = 0;
+      for (const s of roadSegs) {
+        const dd = distToSeg2(x, z, s.x1, s.z1, s.x2, s.z2);
+        if (dd < best) {
+          best = dd;
+          brot = Math.atan2(s.x2 - s.x1, s.z2 - s.z1);
+        }
+      }
+      if (best > half + 13) continue;
+      const rich = Math.hypot(x - 0, z - 40) < 75;
+      const h = 7.5 + rnd() * 5 + (rich ? rnd() * 5 : 0) + (rnd() < 0.1 ? 4 : 0);
+      addHouse(x, z, w, d, h, brot + (rnd() - 0.5) * 0.2, rnd(), rnd() < 0.22);
+      extra++;
     }
   }
 

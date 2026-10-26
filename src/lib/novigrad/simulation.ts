@@ -206,9 +206,9 @@ export class CitizenSim {
     this.cur = dst;
   }
 
-  /** readback позиции follow-горожанина */
-  readFollow(): [number, number] {
-    if (!this.cur) return [0, 0];
+  /** readback позиции follow-горожанина: [x, z, visible] */
+  readFollow(): [number, number, number] {
+    if (!this.cur) return [0, 0, 0];
     const gl = this.gl;
     if (!this.encodeFbo) {
       this.encodeTex = createTexture(gl, 1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST);
@@ -222,6 +222,9 @@ export class CitizenSim {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.cur.s0);
     gl.uniform1i(this.progEncode.u('uS0'), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.cur.s1);
+    gl.uniform1i(this.progEncode.u('uS1'), 1);
     gl.uniform1i(this.progEncode.u('uTexW'), this.texW);
     gl.uniform1i(this.progEncode.u('uIdx'), this.followIdx);
     gl.uniform1f(this.progEncode.u('uHalf'), 450);
@@ -230,7 +233,7 @@ export class CitizenSim {
     gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.encodePix);
     const x = (this.encodePix[0] / 255) * 900 - 450;
     const z = (this.encodePix[1] / 255) * 900 - 450;
-    return [x, z];
+    return [x, z, this.encodePix[3]];
   }
 
   nextCitizen() {
