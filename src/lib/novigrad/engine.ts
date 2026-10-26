@@ -56,12 +56,12 @@ const PALETTE = [
 const FOV = (55 * Math.PI) / 180;
 
 const CINE_POS: number[][] = [
-  [-190, 62, -170], [-70, 24, -122], [-12, 9, -58], [38, 11, -18],
-  [125, 48, 95], [0, 112, 165], [-140, 36, -40], [-95, 16, -98],
+  [-260, 90, -220], [-80, 30, -140], [60, 14, -60], [10, 9, 10],
+  [-120, 26, 60], [-160, 40, 160], [-40, 60, 260], [180, 50, 120],
 ];
 const CINE_TGT: number[][] = [
-  [0, 10, -60], [0, 6, -82], [0, 14, -55], [-10, 6, -4],
-  [0, 10, -12], [0, 6, -30], [-40, 8, -32], [0, 4, -86],
+  [-120, 6, -60], [0, 8, -40], [0, 6, 40], [-60, 10, 40],
+  [-186, 12, -12], [-100, 6, 120], [-72, 8, 130], [80, 8, 40],
 ];
 
 function catmull(p0: number[], p1: number[], p2: number[], p3: number[], t: number): number[] {
@@ -99,16 +99,16 @@ export class NovigradEngine implements NovigradEngineAPI {
   private proj = new Float32Array(16);
   private view = new Float32Array(16);
 
-  private camEye: number[] = [150, 80, 150];
-  private camTarget: number[] = [0, 8, -20];
+  private camEye: number[] = [230, 130, 250];
+  private camTarget: number[] = [0, 8, 40];
   private camFwd: number[] = [0, 0, -1];
   private camRight: number[] = [1, 0, 0];
   private camUp: number[] = [0, 1, 0];
 
   private yaw = 2.35;
   private pitch = 0.62;
-  private dist = 175;
-  private orbitTarget: number[] = [0, 8, -20];
+  private dist = 240;
+  private orbitTarget: number[] = [0, 8, 40];
   private autoSpin = true;
   private tween: {
     t: number; dur: number;
@@ -299,7 +299,7 @@ export class NovigradEngine implements NovigradEngineAPI {
       } else if (pointers.size === 2 && this.mode === 'free') {
         const pts = [...pointers.values()];
         const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-        if (lastPinch > 0) this.dist = clamp(this.dist * (lastPinch / d), 18, 340);
+        if (lastPinch > 0) this.dist = clamp(this.dist * (lastPinch / d), 18, 560);
         lastPinch = d;
       }
     };
@@ -311,7 +311,7 @@ export class NovigradEngine implements NovigradEngineAPI {
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
       if (this.mode !== 'free') return;
-      this.dist = clamp(this.dist * Math.exp(e.deltaY * 0.0012), 18, 340);
+      this.dist = clamp(this.dist * Math.exp(e.deltaY * 0.0012), 18, 560);
       this.tween = null;
     };
     const ctx = (e: Event) => e.preventDefault();
@@ -346,7 +346,7 @@ export class NovigradEngine implements NovigradEngineAPI {
     this.updateSky();
 
     const t0 = performance.now();
-    this.sim!.step(dt, this.citizenSpeed, this.city!.plazaC, this.city!.plaza0, this.city!.plaza1, this.timeS);
+    this.sim!.step(dt, this.citizenSpeed, this.tod, Math.max(this.timeSpeed, 0.02), this.city!.zonePairs, 450);
     this.simMs = this.simMs * 0.9 + (performance.now() - t0) * 0.1;
 
     this.updateCamera(dt);
@@ -467,7 +467,7 @@ export class NovigradEngine implements NovigradEngineAPI {
 
   private computeMatrices() {
     const aspect = (this.canvas!.width || 1) / (this.canvas!.height || 1);
-    mat4Perspective(this.proj, FOV, aspect, 0.5, 900);
+    mat4Perspective(this.proj, FOV, aspect, 0.5, 1600);
     mat4LookAt(this.view, this.camEye, this.camTarget, [0, 1, 0]);
     mat4Mul(this.vp, this.proj, this.view);
 
@@ -498,7 +498,7 @@ export class NovigradEngine implements NovigradEngineAPI {
     gl.uniform3fv(p.u('uSunColor'), this.sunCol);
     gl.uniform3fv(p.u('uAmbient'), this.amb);
     gl.uniform3fv(p.u('uFogColor'), this.fogCol);
-    gl.uniform1f(p.u('uFogDensity'), 0.0026);
+    gl.uniform1f(p.u('uFogDensity'), 0.0017);
     gl.uniform3fv(p.u('uCamPos'), this.camEye);
     gl.uniform1f(p.u('uNight'), this.nightF);
     gl.uniform1f(p.u('uTime'), this.timeS);
@@ -596,6 +596,9 @@ export class NovigradEngine implements NovigradEngineAPI {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.sim!.cur!.t);
       gl.uniform1i(pb.u('uT'), 1);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, this.sim!.cur!.s1);
+      gl.uniform1i(pb.u('uS1'), 2);
       gl.depthMask(false);
       gl.bindVertexArray(this.vaos.shadowBlob.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.sim!.n);
@@ -623,12 +626,13 @@ export class NovigradEngine implements NovigradEngineAPI {
       this.setScene(p);
       gl.uniform1i(p.u('uTexW'), this.sim!.texW);
       gl.uniform3fv(p.u('uPalette'), this.paletteArr);
+      gl.uniform1f(p.u('uTime'), this.timeS);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.sim!.cur!.s0); gl.uniform1i(p.u('uS0'), 0);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.sim!.cur!.s1); gl.uniform1i(p.u('uS1'), 1);
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.sim!.cur!.t); gl.uniform1i(p.u('uT'), 2);
       gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.sim!.cTex!); gl.uniform1i(p.u('uC'), 3);
       gl.bindVertexArray(this.vaos.citizen.vao);
-      gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.sim!.n * 4);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.sim!.n * 6);
     }
 
     // water
@@ -720,8 +724,8 @@ export class NovigradEngine implements NovigradEngineAPI {
       this.followPos = this.sim ? this.sim.readFollow() : [0, 0];
     }
     if (m === 'free') {
-      this.orbitTarget = [0, 8, -10];
-      this.dist = clamp(this.dist, 30, 260);
+      this.orbitTarget = [0, 8, 40];
+      this.dist = clamp(this.dist, 30, 480);
       this.pitch = clamp(this.pitch, 0.2, 1.4);
     }
   }
@@ -729,11 +733,11 @@ export class NovigradEngine implements NovigradEngineAPI {
   focusPOI(p: POI): void {
     this.mode = 'free';
     const presets: Record<POI, { t: number[]; d: number; p: number; y: number }> = {
-      plaza: { t: [0, 4, 0], d: 78, p: 0.58, y: 0.7 },
-      temple: { t: [0, 10, -52], d: 72, p: 0.42, y: 0.45 },
-      harbor: { t: [0, 2, -84], d: 105, p: 0.5, y: Math.PI },
-      walls: { t: [0, 12, 0], d: 168, p: 0.72, y: 0.9 },
-      lighthouse: { t: [-88, 6, -98], d: 58, p: 0.38, y: 0.65 },
+      plaza: { t: [0, 5, 40], d: 95, p: 0.55, y: 0.7 },
+      temple: { t: [-205, 12, -18], d: 110, p: 0.42, y: 0.35 },
+      harbor: { t: [-30, 3, -88], d: 130, p: 0.5, y: Math.PI },
+      walls: { t: [-60, 10, 120], d: 260, p: 0.72, y: 2.2 },
+      lighthouse: { t: [-110, 8, 145], d: 85, p: 0.4, y: -0.8 },
     };
     const pr = presets[p];
     // кратчайшая дуга по yaw

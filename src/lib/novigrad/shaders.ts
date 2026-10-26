@@ -18,28 +18,55 @@ export const SIM_FS = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
 
-layout(location=0) out vec4 o0;
-layout(location=1) out vec4 o1;
-layout(location=2) out vec4 o2;
+/* Новиград v2: профессии и суточное расписание.
+   state: 0=WALK 1=IDLE 2=WORK 3=HOME(скрыт) 4=CARRY(грузчик с тюком)
+   prof : 0=горожанин 1=стражник 2=купец 3=кузнец 4=грузчик 5=куртизанка 6=калюшон 7=бандит */
+
+layout(location=0) out vec4 o0;  // pos.xy, vel.xy
+layout(location=1) out vec4 o1;  // speed, phase, state, timer
+layout(location=2) out vec4 o2;  // facing, target, intent, 1
 
 uniform sampler2D uS0;
 uniform sampler2D uS1;
 uniform sampler2D uT;
-uniform sampler2D uWP;   // (x, z, neighborCount, neighborOffset)
-uniform sampler2D uNE;   // neighbor waypoint indices
-uniform sampler2D uOcc;  // occupancy R8, world span 260
+uniform sampler2D uC;    // static: r=colorSeed, g=height, b=seed, a=prof/255
+uniform sampler2D uWP;
+uniform sampler2D uNE;
+uniform sampler2D uOcc;
 
 uniform float uDt;
 uniform float uTime;
-uniform float uNf;       // population as float
-uniform float uTS;       // citizen speed multiplier
+uniform float uNf;
+uniform float uTS;
+uniform float uTod;      // время суток 0..24
+uniform float uTodSpeed; // игровых часов за секунду
+uniform float uOccHalf;  // полуширина мира (450)
 uniform int uTexW;
 uniform int uN;
-uniform int uPlaza0;
-uniform int uPlaza1;
-uniform vec2 uPlazaC;
+uniform vec2 uZones[13];
 
-float rnd(float a) { return fract(sin(a * 127.1 + uTime * 0.731) * 43758.5453); }
+#define CAT_PLAZA 0
+#define CAT_STALL 1
+#define CAT_ANVIL 2
+#define CAT_PIER 3
+#define CAT_WARE 4
+#define CAT_TAVERN 5
+#define CAT_ALLEY 6
+#define CAT_COURT 7
+#define CAT_TEMPLE 8
+#define CAT_PATA 9
+#define CAT_PATC 10
+#define CAT_PATD 11
+#define CAT_STREET 12
+
+float h1(float n) { return fract(sin(n) * 43758.5453123); }
+float rndT(float a) { return fract(sin(a * 127.1 + floor(uTime * 0.35) * 311.7) * 43758.5453); }
+
+int pick(int cat, float r) {
+  vec2 z = uZones[cat];
+  return int(z.x + clamp(r, 0.0, 0.999) * max(z.y - z.x, 1.0));
+}
+float hoursTo(float h) { return mod(h - uTod + 24.0, 24.0); }
 
 void main() {
   ivec2 tc = ivec2(gl_FragCoord.xy);
@@ -48,7 +75,8 @@ void main() {
 
   vec4 s0 = texelFetch(uS0, tc, 0);
   vec4 s1 = texelFetch(uS1, tc, 0);
-  vec2 td = texelFetch(uT, tc, 0).xy;   // facing, targetIdx
+  vec4 td = texelFetch(uT, tc, 0);
+  vec4 c = texelFetch(uC, tc, 0);
 
   vec2 pos = s0.xy;
   vec2 vel = s0.zw;
@@ -57,96 +85,234 @@ void main() {
   float state = s1.z;
   float timer = s1.w;
   float tgt = td.y;
+  float intent = td.z;              // 0=прогул 1=домой 2=на дело
 
+  float prof = floor(c.a * 255.0 + 0.5);
   float dt = uDt * uTS;
+
+  float hs0 = h1(float(idx) * 0.731 + 1.0);
+  float hs1 = h1(float(idx) * 1.571 + 2.0);
+  float hs2 = h1(float(idx) * 2.913 + 3.0);
+  float hs3 = h1(float(idx) * 4.201 + 4.0);
+  float hs4 = h1(float(idx) * 5.377 + 5.0);
+
+  bool isNight = uTod < 6.2 || uTod >= 21.0;
 
   ivec2 wtc = ivec2(int(tgt) & 63, int(tgt) >> 6);
   vec4 wp = texelFetch(uWP, wtc, 0);
   vec2 tp = wp.xy;
 
-  float r1 = rnd(float(idx) * 1.7 + 11.0);
-  float r2 = rnd(float(idx) * 2.3 + 37.0);
-  float r3 = rnd(float(idx) * 3.1 + 53.0);
-  float r4 = rnd(float(idx) * 4.9 + 91.0);
+  /* ---------- решение: прибытие / конец таймера ---------- */
+  // intent: 0 прогул, 1 домой, 1.5 домой (грузчик), 0.25 «на пирсе», 1.0 «с тюком» (грузчик)
+  // td.w = категория места текущей цели
+  bool arrived = false;
+  bool needDecision = false;
 
-  if (state < 0.5) {
-    // ---- WALK ----
+  if (state < 0.5 || (state > 3.5 && state < 4.5)) {
+    // ================= WALK / CARRY =================
+    float spdMult = prof < 0.5 ? 1.0 : prof < 1.5 ? 1.12 : prof < 2.5 ? 0.95 :
+                    prof < 3.5 ? 1.0 : prof < 4.5 ? 1.22 : prof < 5.5 ? 0.82 :
+                    prof < 6.5 ? 0.6 : 1.0;
+    if (state > 3.5) spdMult *= 0.9; // тяжесть тюка
+    if (isNight && intent > 0.5 && intent < 1.8) spdMult *= 1.18; // спешит домой
+
     vec2 dir = tp - pos;
     float dl = max(length(dir), 0.001);
-    vec2 desired = dir / dl * speed;
+    float wob = (hs1 - 0.5) * 0.55;
+    vec2 dw = vec2(dir.x * cos(wob) - dir.y * sin(wob), dir.x * sin(wob) + dir.y * cos(wob));
+    vec2 desired = dw / dl * speed * spdMult;
     vel = mix(vel, desired, clamp(dt * 2.2, 0.0, 1.0));
 
-    // separation from 3 random citizens
     for (int k = 0; k < 3; k++) {
-      float rk = rnd(float(idx) * 5.7 + float(k) * 17.0 + 91.0);
+      float rk = h1(float(idx) * 5.7 + float(k) * 17.0 + floor(uTime * 0.5) * 0.11);
       int oi = int(rk * uNf);
       ivec2 otc = ivec2(oi % uTexW, oi / uTexW);
       vec4 od = texelFetch(uS0, otc, 0);
       vec2 d = pos - od.xy;
       float l = length(d);
-      if (l < 1.15 && l > 0.001) { vel += (d / l) * (1.15 - l) * 2.4; }
+      if (l < 1.2 && l > 0.001) { vel += (d / l) * (1.2 - l) * 2.6; }
     }
 
-    // integrate with occupancy collision
     vec2 np = pos + vel * dt;
-    vec2 ouv = (np + 130.0) / 260.0;
+    vec2 ouv = (np + uOccHalf) / (2.0 * uOccHalf);
     float blocked = texture(uOcc, ouv).r;
     if (blocked > 0.5) {
       vec2 nx = vec2(np.x, pos.y);
       vec2 nz = vec2(pos.x, np.y);
-      float bx = texture(uOcc, (nx + 130.0) / 260.0).r;
-      float bz = texture(uOcc, (nz + 130.0) / 260.0).r;
+      float bx = texture(uOcc, (nx + uOccHalf) / (2.0 * uOccHalf)).r;
+      float bz = texture(uOcc, (nz + uOccHalf) / (2.0 * uOccHalf)).r;
       if (bx < 0.5) { np = nx; vel.y *= 0.4; }
       else if (bz < 0.5) { np = nz; vel.x *= 0.4; }
       else {
         np = pos;
         vel *= -0.2;
-        // stuck: retarget to a random neighbor
         int cnt = int(wp.z);
         int off = int(wp.w);
         if (cnt > 0) {
-          int pick = off + int(clamp(r4, 0.0, 0.999) * float(cnt));
-          tgt = float(int(texelFetch(uNE, ivec2(pick, 0), 0).r));
+          int pk = off + int(clamp(hs4, 0.0, 0.999) * float(cnt));
+          tgt = float(int(texelFetch(uNE, ivec2(pk, 0), 0).r));
         }
       }
     }
     pos = np;
     phase += length(vel) * dt * 2.4;
 
-    // arrival
     vec2 dcur = tp - pos;
-    if (dot(dcur, dcur) < 2.9) {
-      bool inPlaza = int(tgt) >= uPlaza0 && int(tgt) < uPlaza1;
-      float idleP = inPlaza ? 0.42 : 0.13;
-      if (r1 < idleP) {
-        state = 1.0;
-        timer = 0.8 + r2 * 3.2;
-        if (inPlaza) timer += 2.5;
-      } else {
-        int cnt = int(wp.z);
-        int off = int(wp.w);
-        if (cnt > 0) {
-          int pick = off + int(clamp(r3, 0.0, 0.999) * float(cnt));
-          tgt = float(int(texelFetch(uNE, ivec2(pick, 0), 0).r));
-        }
-        if (r2 < 0.05 && length(pos - uPlazaC) < 48.0) {
-          tgt = float(uPlaza0 + int(clamp(r1, 0.0, 0.999) * float(uPlaza1 - uPlaza0)));
-        }
-      }
-    }
-  } else {
-    // ---- IDLE ----
+    if (dot(dcur, dcur) < 3.6) { arrived = true; needDecision = true; }
+  } else if (state < 1.5) {
+    // ============ IDLE ============
     vel *= max(1.0 - dt * 3.5, 0.0);
     timer -= dt;
-    if (timer <= 0.0) {
-      state = 0.0;
-      int cnt = int(wp.z);
-      int off = int(wp.w);
-      if (r2 < 0.30) {
-        tgt = float(uPlaza0 + int(clamp(r3, 0.0, 0.999) * float(uPlaza1 - uPlaza0)));
-      } else if (cnt > 0) {
-        int pick = off + int(clamp(r1, 0.0, 0.999) * float(cnt));
-        tgt = float(int(texelFetch(uNE, ivec2(pick, 0), 0).r));
+    if (timer <= 0.0) needDecision = true;
+  } else if (state < 2.5) {
+    // ================= WORK =================
+    vel *= 0.0;
+    timer -= dt;
+    if (timer <= 0.0) needDecision = true;
+  } else {
+    // ================= HOME (скрыт, ждёт утра) =================
+    vel *= 0.0;
+    timer -= dt;
+    if (timer <= 0.0) needDecision = true;
+  }
+
+  if (needDecision) {
+    float rA = rndT(float(idx) * 1.13 + 7.0);
+    float rB = rndT(float(idx) * 2.17 + 13.0);
+    float rC = rndT(float(idx) * 3.71 + 29.0);
+    float place = td.w;
+    float goHomeTimer = min(hoursTo(6.2 + hs2 * 1.6) / max(uTodSpeed, 0.004), 900.0);
+
+    if (prof < 0.5) {
+      // ---------- горожанин ----------
+      if (arrived && intent > 0.5 && intent < 1.5) {
+        state = 3.0; timer = goHomeTimer;
+      } else if (isNight || uTod >= 19.6) {
+        intent = 1.0; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (arrived) {
+        if (place > 11.5) {
+          // улица: осмотреться или идти дальше
+          if (rC < 0.3) { state = 1.0; timer = 2.0 + rA * 5.0; }
+          else { tgt = float(pick(CAT_STREET, rB)); td.w = float(CAT_STREET); intent = 0.0; state = 0.0; }
+        } else {
+          state = 1.0;
+          if (place > 4.5 && place < 5.5) timer = 16.0 + rC * 30.0;   // таверна
+          else if (place < 0.5) timer = 8.0 + rC * 14.0;              // площадь
+          else timer = 4.0 + rC * 9.0;                                // рынок/храм/пирс
+        }
+      } else {
+        int cat;
+        if (uTod < 9.0)       cat = rA < 0.4 ? CAT_STALL : rA < 0.65 ? CAT_TEMPLE : rA < 0.85 ? CAT_PIER : CAT_STREET;
+        else if (uTod < 14.0) cat = rA < 0.45 ? CAT_TAVERN : rA < 0.75 ? CAT_PLAZA : CAT_STREET;
+        else if (uTod < 18.0) cat = rA < 0.35 ? CAT_STALL : rA < 0.6 ? CAT_STREET : rA < 0.78 ? CAT_PLAZA : rA < 0.9 ? CAT_PIER : CAT_TEMPLE;
+        else                  cat = rA < 0.45 ? CAT_TAVERN : rA < 0.8 ? CAT_STREET : CAT_PLAZA;
+        tgt = float(pick(cat, rB)); td.w = float(cat);
+        intent = cat == CAT_STREET ? 0.0 : 2.0;
+        state = 0.0;
+      }
+    } else if (prof < 1.5) {
+      // ---------- стражник ----------
+      if (arrived && intent > 0.5 && intent < 1.5) {
+        state = 3.0; timer = goHomeTimer;
+      } else if (isNight && hs1 > 0.42 && !(intent > 0.5 && intent < 1.5)) {
+        intent = 1.0; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (arrived) {
+        state = 1.0; timer = 1.2 + rB * 3.5;
+      } else {
+        int zone = hs0 < 0.34 ? CAT_PATA : hs0 < 0.67 ? CAT_PATC : CAT_PATD;
+        tgt = float(pick(zone, rA)); td.w = float(zone);
+        intent = 2.0; state = 0.0;
+      }
+    } else if (prof < 2.5) {
+      // ---------- купец ----------
+      bool offDuty = isNight || uTod >= 19.0 || uTod < 7.5;
+      if (arrived && intent > 0.5 && intent < 1.5) {
+        state = 3.0; timer = goHomeTimer;
+      } else if (offDuty && !(intent > 0.5 && intent < 1.5)) {
+        intent = 1.0; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (arrived) {
+        if (intent > 1.5) { state = 2.0; timer = 35.0 + hs3 * 80.0; }   // торгует за прилавком
+        else { state = 1.0; timer = 3.0 + rC * 6.0; }
+      } else if (rC < 0.1) {
+        tgt = float(pick(CAT_STREET, rB)); td.w = float(CAT_STREET); intent = 2.0; state = 0.0;
+      } else {
+        tgt = float(pick(CAT_STALL, rA)); td.w = float(CAT_STALL); intent = 2.0; state = 0.0;
+      }
+    } else if (prof < 3.5) {
+      // ---------- кузнец ----------
+      bool offDuty = uTod >= 19.0 || uTod < 7.0;
+      if (arrived && intent > 0.5 && intent < 1.5) {
+        state = 3.0; timer = goHomeTimer;
+      } else if (offDuty && !(intent > 0.5 && intent < 1.5)) {
+        intent = 1.0; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (arrived) {
+        if (intent > 1.5) { state = 2.0; timer = 55.0 + hs3 * 120.0; }  // работает у наковальни
+        else { state = 1.0; timer = 3.0 + rC * 6.0; }
+      } else if (rC < 0.07) {
+        tgt = float(pick(CAT_STREET, rB)); td.w = float(CAT_STREET); intent = 2.0; state = 0.0;
+      } else {
+        tgt = float(pick(CAT_ANVIL, rA)); td.w = float(CAT_ANVIL); intent = 2.0; state = 0.0;
+      }
+    } else if (prof < 4.5) {
+      // ---------- грузчик: пирс <-> склад ----------
+      bool offDuty = isNight || uTod < 6.5 || uTod >= 19.5;
+      if (arrived && intent > 1.2 && intent < 1.8) {
+        state = 3.0; timer = goHomeTimer;
+      } else if (offDuty && !(intent > 1.2 && intent < 1.8)) {
+        intent = 1.5; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (intent < 0.25) {
+        tgt = float(pick(CAT_PIER, rA)); td.w = float(CAT_PIER); intent = 0.25; state = 0.0;
+      } else if (intent < 0.75) {
+        if (arrived) { state = 1.0; timer = 1.0 + rB * 2.5; }            // пауза на пирсе
+        else { tgt = float(pick(CAT_WARE, rA)); td.w = float(CAT_WARE); intent = 1.0; state = 4.0; } // тюком к складу
+      } else if (intent < 1.25) {
+        if (arrived) { state = 2.0; timer = 2.5 + rC * 3.5; }            // разгрузка
+        else { tgt = float(pick(CAT_PIER, rA)); td.w = float(CAT_PIER); intent = 0.25; state = 0.0; }
+      } else {
+        state = 0.0; // уже идёт домой
+      }
+    } else if (prof < 5.5) {
+      // ---------- куртизанка ----------
+      bool onDuty = uTod >= 12.0 || uTod < 2.5;
+      if (arrived && intent > 0.5 && intent < 1.5) {
+        state = 3.0; timer = min(hoursTo(11.8 + hs2) / max(uTodSpeed, 0.004), 900.0);
+      } else if (!onDuty && !(intent > 0.5 && intent < 1.5)) {
+        intent = 1.0; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (arrived) {
+        if (intent > 1.5 && place > 6.5 && place < 7.5) { state = 2.0; timer = 22.0 + hs3 * 55.0; }
+        else { state = 1.0; timer = 4.0 + rC * 8.0; }
+      } else if (rC < 0.2) {
+        int cat = rB < 0.5 ? CAT_PLAZA : CAT_STREET;
+        tgt = float(pick(cat, rA)); td.w = float(cat); intent = 2.0; state = 0.0;
+      } else {
+        tgt = float(pick(CAT_COURT, rA)); td.w = float(CAT_COURT); intent = 2.0; state = 0.0;
+      }
+    } else if (prof < 6.5) {
+      // ---------- человек в капюшоне ----------
+      bool dayHide = !isNight && uTod >= 5.0;
+      if (arrived && intent > 0.5 && intent < 1.5) {
+        state = 3.0; timer = min(hoursTo(20.5 + hs2 * 2.0) / max(uTodSpeed, 0.004), 900.0);
+      } else if (dayHide && !(intent > 0.5 && intent < 1.5)) {
+        intent = 1.0; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (arrived) {
+        state = 1.0; timer = 6.0 + rC * 16.0;
+      } else {
+        int cat = rA < 0.55 ? CAT_ALLEY : rA < 0.85 ? CAT_TEMPLE : CAT_COURT;
+        tgt = float(pick(cat, rB)); td.w = float(cat); intent = 2.0; state = 0.0;
+      }
+    } else {
+      // ---------- бандит ----------
+      bool dayHide = !isNight && hs0 < 0.7;
+      if (arrived && intent > 0.5 && intent < 1.5) {
+        state = 3.0; timer = min(hoursTo(21.0 + hs2 * 1.5) / max(uTodSpeed, 0.004), 900.0);
+      } else if (dayHide && !(intent > 0.5 && intent < 1.5)) {
+        intent = 1.0; tgt = float(pick(CAT_STREET, hs2)); td.w = float(CAT_STREET); state = 0.0;
+      } else if (arrived) {
+        state = 2.0; timer = 8.0 + hs3 * 18.0; // торчит в переулке
+      } else if (rC < 0.2) {
+        tgt = float(pick(CAT_STREET, rB)); td.w = float(CAT_STREET); intent = 2.0; state = 0.0;
+      } else {
+        tgt = float(pick(CAT_ALLEY, rA)); td.w = float(CAT_ALLEY); intent = 2.0; state = 0.0;
       }
     }
   }
@@ -163,7 +329,7 @@ void main() {
 
   o0 = vec4(pos, vel);
   o1 = vec4(speed, phase, state, timer);
-  o2 = vec4(td.x, tgt, 0.0, 1.0);
+  o2 = vec4(td.x, tgt, intent, 1.0);
 }
 `;
 
@@ -177,12 +343,13 @@ out vec4 fragColor;
 uniform sampler2D uS0;
 uniform int uTexW;
 uniform int uIdx;
+uniform float uHalf;
 void main() {
   ivec2 tc = ivec2(uIdx % uTexW, uIdx / uTexW);
   vec4 s = texelFetch(uS0, tc, 0);
   float sp = clamp(length(s.zw) / 3.0, 0.0, 1.0);
-  fragColor = vec4(clamp((s.x + 130.0) / 260.0, 0.0, 1.0),
-                   clamp((s.y + 130.0) / 260.0, 0.0, 1.0),
+  fragColor = vec4(clamp((s.x + uHalf) / (2.0 * uHalf), 0.0, 1.0),
+                   clamp((s.y + uHalf) / (2.0 * uHalf), 0.0, 1.0),
                    sp, 1.0);
 }
 `;
@@ -426,9 +593,9 @@ void main() {
   float glitter = pow(max(dot(R, uSunDir), 0.0), 700.0);
   col += uSunColor * glitter * 3.0;
 
-  // near-shore foam
-  float foam = smoothstep(-80.0, -77.6, vWorld.z) * (0.55 + 0.45 * sin(p.x * 0.7 + t * 1.8));
-  col = mix(col, vec3(0.62, 0.66, 0.64), clamp(foam, 0.0, 1.0) * 0.35);
+  // sparkle
+  float spark = hash12(floor(p * 3.0) + floor(t * 2.0));
+  col += vec3(0.5, 0.6, 0.6) * step(0.985, spark) * 0.25;
 
   col *= (uAmbient * 1.7 + uSunColor * 0.28);
 
@@ -686,6 +853,12 @@ void main() {
     col = vec3(0.36, 0.36, 0.35);
     float cm = hash12(floor(vec2(u, v) * 2.0) + vSeed);
     col *= 0.85 + 0.3 * cm;
+  } else if (type < 11.5) {
+    // T_ANVIL (11): тёмное железо
+    col = vec3(0.13, 0.13, 0.15);
+    float cm = hash12(floor(vec2(u, v) * 3.0) + vSeed);
+    col *= 0.85 + 0.3 * cm;
+    col += vec3(0.25, 0.22, 0.18) * smoothstep(0.8, 1.0, v / max(vSize.y, 0.01));
   } else {
     // fallback wood
     col = vec3(0.40, 0.29, 0.17);
@@ -953,6 +1126,7 @@ uniform sampler2D uT;
 uniform sampler2D uC;
 uniform int uTexW;
 uniform vec3 uPalette[14];
+uniform float uTime;
 out vec3 vColor;
 out vec3 vWorld;
 out vec3 vNormal;
@@ -962,11 +1136,15 @@ float hash12(vec2 p) {
   p3 += dot(p3, p3.yzx + 33.33);
   return fract((p3.x + p3.y) * p3.z);
 }
+vec3 rotXp(vec3 v, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(v.x, v.y * c - v.z * s, v.y * s + v.z * c);
+}
 
 void main() {
   int inst = gl_InstanceID;
-  int ci = inst >> 2;
-  int part = inst & 3;
+  int part = inst - (inst / 6) * 6;
+  int ci = inst / 6;
   ivec2 tc = ivec2(ci % uTexW, ci / uTexW);
   vec4 s0 = texelFetch(uS0, tc, 0);
   vec4 s1 = texelFetch(uS1, tc, 0);
@@ -976,59 +1154,129 @@ void main() {
   vec2 pos = s0.xy;
   vec2 vel = s0.zw;
   float phase = s1.y;
+  float state = s1.z;
   float spd = length(vel);
+  float prof = floor(c.a * 255.0 + 0.5);
+  float seed = c.b;
+
+  // HOME -> невидим
+  float vis = state > 2.5 && state < 3.5 ? 0.0 : 1.0;
+
   float wa = clamp(spd / 1.1, 0.0, 1.0);
-  float h = 0.85 + c.g * 0.30;
-  float guard = c.a;
-  h *= 1.0 + guard * 0.13;
+  float h = (0.85 + c.g * 0.30) * (1.0 + step(0.5, prof) * step(prof, 1.5) * 0.13) * vis;
+  float carry = state > 3.5 && state < 4.5 ? 1.0 : 0.0;
+  bool smithWork = prof > 2.5 && prof < 3.5 && state > 1.5 && state < 2.5;
+  bool courtWork = prof > 4.5 && prof < 5.5 && state > 1.5 && state < 2.5;
+  bool merchWork = prof > 1.5 && prof < 2.5 && state > 1.5 && state < 2.5;
+  bool hooded = (prof > 5.5 && prof < 6.5) || (prof > 6.5 && prof < 7.5);
 
   float ang = td.x;
-  float cA = cos(ang);
-  float sA = sin(ang);
-  mat3 R = mat3(cA, 0.0, -sA, 0.0, 1.0, 0.0, sA, 0.0, cA);
+  float cA = cos(ang), sA = sin(ang);
 
   float swing = sin(phase) * 0.55 * wa;
-  vec3 lp;
-  vec3 lsize;
-  if (part == 0) {
-    float cs = cos(swing);
-    float ss = sin(swing);
-    lp = vec3(0.11, 0.86 - 0.42 * cs, 0.42 * ss);
-    lsize = vec3(0.15, 0.84, 0.18);
-  } else if (part == 1) {
-    float cs = cos(-swing);
-    float ss = sin(-swing);
-    lp = vec3(-0.11, 0.86 - 0.42 * cs, 0.42 * ss);
-    lsize = vec3(0.15, 0.84, 0.18);
+  float bob = abs(sin(phase)) * 0.05 * wa + carry * abs(sin(phase * 1.8)) * 0.03;
+  float lean = carry * 0.22 + (smithWork ? 0.10 : 0.0);
+  float sway = courtWork ? sin(uTime * 1.7 + seed * 13.0) * 0.05 : (merchWork ? sin(uTime * 1.1 + seed * 9.0) * 0.02 : 0.0);
+
+  vec3 pc;    // центр части (локально, до rotY)
+  vec3 sc;    // размер части
+  float partRot = 0.0;
+
+  if (part == 0 || part == 1) {
+    float sgn = part == 0 ? 1.0 : -1.0;
+    float cs = cos(swing * sgn), ss = sin(swing * sgn);
+    pc = vec3(0.11 * sgn, 0.86 - 0.42 * cs, 0.42 * ss);
+    sc = vec3(0.15, 0.84, 0.18);
   } else if (part == 2) {
-    lp = vec3(0.0, 0.86, 0.0);
-    lsize = vec3(0.50, 0.64, 0.30);
+    // торс / плащ
+    if (prof > 5.5 && prof < 6.5) sc = vec3(0.60, 0.72, 0.44);
+    else if (prof > 6.5) sc = vec3(0.54, 0.68, 0.40);
+    else sc = vec3(0.50, 0.64, 0.30);
+    vec3 raw = vec3(0.0, 0.86, 0.0);
+    pc = rotXp(raw, lean);
+    partRot = lean;
+  } else if (part == 3) {
+    // голова
+    vec3 raw = vec3(0.0, 1.50, 0.02);
+    pc = rotXp(raw, lean);
+    pc.x += sway;
+    sc = vec3(0.26, 0.26, 0.25);
+    if (hooded) sc = vec3(0.22, 0.22, 0.21);
+    partRot = lean;
+  } else if (part == 4) {
+    // молот кузнеца
+    if (smithWork) {
+      float a = -0.5 + sin(uTime * 7.0 + seed * 11.0) * 0.9;
+      vec3 pivot = vec3(0.30, 1.18, 0.10);
+      vec3 rel = rotXp(vec3(0.0, 0.30, 0.0), a);
+      pc = pivot + rel;
+      partRot = a;
+      sc = vec3(0.10, 0.55, 0.10);
+    } else { sc = vec3(0.0); }
   } else {
-    lp = vec3(0.0, 1.50, 0.02);
-    lsize = vec3(0.26, 0.26, 0.25);
+    // юбка куртизанки / капюшон
+    if (prof > 4.5 && prof < 5.5) {
+      pc = vec3(sway, 0.48, 0.0);
+      sc = vec3(0.52, 0.60, 0.42);
+    } else if (hooded) {
+      vec3 raw = vec3(0.0, 1.56, 0.0);
+      pc = rotXp(raw, lean);
+      sc = vec3(0.30, 0.32, 0.32);
+      partRot = lean;
+    } else { sc = vec3(0.0); }
   }
 
-  float bob = abs(sin(phase)) * 0.05 * wa;
-  vec3 localC = vec3(lp.x * h, lp.y * h + bob, lp.z * h);
-  vec3 local = localC + vec3(aPos.x * lsize.x * h, aPos.y * lsize.y * h, aPos.z * lsize.z * h);
-  vec3 world = vec3(pos.x + cA * local.x + sA * local.z, local.y, pos.y - sA * local.x + cA * local.z);
+  // поворот части вокруг X (для наклонов/молота) вокруг центра части
+  vec3 localC = vec3(pc.x * h, pc.y * h + bob, pc.z * h);
+  vec3 lp = rotXp(vec3(aPos.x * sc.x, aPos.y * sc.y, aPos.z * sc.z) * h, partRot) + localC;
+  vec3 nrm = rotXp(aNormal, partRot);
+  vec3 world = vec3(pos.x + cA * lp.x + sA * lp.z, lp.y, pos.y - sA * lp.x + cA * lp.z);
 
-  // color
-  int ci2 = int(floor(c.r * 13.99));
-  vec3 cloth = uPalette[ci2];
-  float vary = 0.82 + 0.36 * hash12(vec2(c.b, c.b * 7.0));
-  cloth *= vary;
-  vec3 skin = vec3(0.78, 0.62, 0.48) * (0.85 + 0.3 * hash12(vec2(c.b * 3.0, 1.0)));
+  // ---- цвет по профессии ----
+  float hs = hash12(vec2(seed, seed * 7.0 + 3.0));
+  float vr = 0.82 + 0.36 * hash12(vec2(seed, seed * 3.0 + 1.0));
+  int pal = int(floor(c.r * 13.99));
+  vec3 cloth;
+  if (prof < 0.5) cloth = uPalette[pal] * vr;
+  else if (prof < 1.5) cloth = vec3(0.50, 0.13, 0.10) * (0.85 + 0.3 * hs);
+  else if (prof < 2.5) {
+    if (hs < 0.34) cloth = vec3(0.33, 0.18, 0.36);
+    else if (hs < 0.67) cloth = vec3(0.14, 0.31, 0.20);
+    else cloth = vec3(0.52, 0.15, 0.15);
+    cloth *= vr;
+  }
+  else if (prof < 3.5) cloth = vec3(0.34, 0.25, 0.16) * vr;
+  else if (prof < 4.5) cloth = vec3(0.37, 0.34, 0.28) * (0.75 + 0.5 * hs);
+  else if (prof < 5.5) {
+    if (hs < 0.4) cloth = vec3(0.70, 0.13, 0.28);
+    else if (hs < 0.75) cloth = vec3(0.10, 0.40, 0.40);
+    else cloth = vec3(0.75, 0.34, 0.42);
+    cloth *= 0.9 + 0.25 * hs;
+  }
+  else if (prof < 6.5) cloth = vec3(0.09, 0.09, 0.11) * (0.8 + 0.4 * hs);
+  else cloth = vec3(0.23, 0.18, 0.12) * (0.8 + 0.4 * hs);
+
+  vec3 skin = vec3(0.78, 0.62, 0.48) * (0.85 + 0.3 * hash12(vec2(seed * 3.0, 1.0)));
   vec3 steel = vec3(0.28, 0.29, 0.31);
-  if (part == 3) {
-    vColor = mix(skin, steel * 0.9, guard * 0.85);
-  } else if (part == 2) {
-    vColor = mix(cloth, steel, guard);
-  } else {
-    vColor = cloth * 0.72;
-  }
 
-  vNormal = R * aNormal;
+  if (part == 4) vColor = vec3(0.14, 0.14, 0.16);                 // молот
+  else if (part == 5) {
+    if (prof > 4.5 && prof < 5.5) vColor = cloth;
+    else if (prof > 5.5 && prof < 6.5) vColor = vec3(0.07, 0.07, 0.09);
+    else vColor = vec3(0.16, 0.12, 0.09);
+  }
+  else if (part == 3) {
+    if (prof > 0.5 && prof < 1.5) vColor = steel;                 // шлем стражника
+    else if (hooded) vColor = vec3(0.10, 0.09, 0.08);
+    else vColor = skin;
+  }
+  else if (part == 2) {
+    if (prof > 0.5 && prof < 1.5) vColor = mix(cloth, steel, 0.35);
+    else vColor = cloth;
+  }
+  else vColor = cloth * 0.62;                                     // ноги
+
+  vNormal = vec3(cA * nrm.x + sA * nrm.z, nrm.y, -sA * nrm.x + cA * nrm.z);
   vWorld = world;
   gl_Position = uVP * vec4(world, 1.0);
 }
@@ -1098,6 +1346,7 @@ export const SHADOW_BLOB_VS = /* glsl */ `#version 300 es
 layout(location=0) in vec2 aPos;
 uniform mat4 uVP;
 uniform sampler2D uS0;
+uniform sampler2D uS1;
 uniform sampler2D uT;
 uniform int uTexW;
 uniform vec3 uSunDir;
@@ -1106,7 +1355,9 @@ void main() {
   int ci = gl_InstanceID;
   ivec2 tc = ivec2(ci % uTexW, ci / uTexW);
   vec4 s0 = texelFetch(uS0, tc, 0);
-  vec2 q = aPos;
+  float state = texelFetch(uS1, tc, 0).z;
+  float vis = state > 2.5 && state < 3.5 ? 0.0 : 1.0;
+  vec2 q = aPos * vis;
   vec2 off = uSunDir.xz * (0.9 / max(-uSunDir.y, 0.2));
   vec2 c = s0.xy + off;
   vec3 world = vec3(c.x + q.x * 0.85, 0.04, c.y + q.y * 0.85);
